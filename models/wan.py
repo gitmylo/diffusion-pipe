@@ -20,6 +20,7 @@ import wan
 from wan.modules.t5 import T5Encoder, T5Decoder, T5Model
 from wan.modules.tokenizers import HuggingfaceTokenizer
 from wan.modules.vae import WanVAE
+from wan.modules.vae2_2 import Wan2_2_VAE
 from wan.modules.model import (
     WanModel, sinusoidal_embedding_1d, WanLayerNorm, WanSelfAttention, WAN_CROSSATTENTION_CLASSES
 )
@@ -420,6 +421,7 @@ class WanPipeline(BasePipeline):
         elif not self.i2v and model_dim == 5120:
             wan_config = wan_configs.t2v_14B
         elif not self.i2v and model_dim == 3072: # Wan 2.2 5b
+            self.framerate = 24
             wan_config = EasyDict()
 
             # t5
@@ -482,11 +484,18 @@ class WanPipeline(BasePipeline):
         self.text_encoder.model.requires_grad_(False)
 
         # Same here, this isn't a nn.Module.
-        self.vae = WanVAE(
-            vae_pth=os.path.join(ckpt_dir, wan_config.vae_checkpoint),
-            device='cpu',
-            dtype=dtype,
-        )
+        if model_dim == 3072: # 5b 2.2
+            self.vae = Wan2_2_VAE(
+                vae_pth=os.path.join(ckpt_dir, wan_config.vae_checkpoint),
+                device='cpu',
+                dtype=dtype,
+            )
+        else:
+            self.vae = WanVAE(
+                vae_pth=os.path.join(ckpt_dir, wan_config.vae_checkpoint),
+                device='cpu',
+                dtype=dtype,
+            )
         self.vae.model.to(dtype)
         # These need to be on the device the VAE will be moved to during caching.
         self.vae.mean = self.vae.mean.to('cuda')

@@ -10,6 +10,9 @@
 [submodule "submodules/Wan2_1"]
 	path = submodules/Wan2_1
 	url = https://github.com/Wan-Video/Wan2.1
+[submodule "submodules/Wan2_2"]
+    path = "submodules/Wan2_2"
+    url = https://github.com/Wan-Video/Wan2.2
 [submodule "submodules/flow"]
 	path = submodules/flow
 	url = https://github.com/lodestone-rock/flow
