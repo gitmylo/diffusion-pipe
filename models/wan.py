@@ -26,6 +26,7 @@ from wan.modules.model import (
 from wan.modules.clip import CLIPModel
 from wan import configs as wan_configs
 from safetensors.torch import load_file
+from easydict import EasyDict
 
 KEEP_IN_HIGH_PRECISION = ['norm', 'bias', 'patch_embedding', 'text_embedding', 'time_embedding', 'time_projection', 'head', 'modulation']
 
@@ -418,6 +419,49 @@ class WanPipeline(BasePipeline):
             wan_config = wan_configs.flf2v_14B
         elif not self.i2v and model_dim == 5120:
             wan_config = wan_configs.t2v_14B
+        elif not self.i2v and model_dim == 3072: # Wan 2.2 5b
+            wan_config = EasyDict()
+
+            # t5
+            wan_config.t5_model = 'umt5_xxl'
+            wan_config.t5_dtype = torch.bfloat16
+            wan_config.text_len = 512
+
+            # transformer
+            wan_config.param_dtype = torch.bfloat16
+
+            # inference
+            wan_config.num_train_timesteps = 1000
+            wan_config.sample_fps = 16
+            wan_config.sample_neg_prompt = '色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走'
+            wan_config.frame_num = 81
+
+            # t5
+            wan_config.t5_checkpoint = 'models_t5_umt5-xxl-enc-bf16.pth'
+            wan_config.t5_tokenizer = 'google/umt5-xxl'
+
+            # vae
+            wan_config.vae_checkpoint = 'Wan2.2_VAE.pth'
+            wan_config.vae_stride = (4, 16, 16)
+
+            # transformer
+            wan_config.patch_size = (1, 2, 2)
+            wan_config.dim = 3072
+            wan_config.ffn_dim = 14336
+            wan_config.freq_dim = 256
+            wan_config.num_heads = 24
+            wan_config.num_layers = 30
+            wan_config.window_size = (-1, -1)
+            wan_config.qk_norm = True
+            wan_config.cross_attn_norm = True
+            wan_config.eps = 1e-6
+
+            # inference
+            wan_config.sample_fps = 24
+            wan_config.sample_shift = 5.0
+            wan_config.sample_steps = 50
+            wan_config.sample_guide_scale = 5.0
+            wan_config.frame_num = 121
         else:
             raise RuntimeError(f'Could not autodetect model variant. model_dim={model_dim}, i2v={self.i2v}, flf2v={self.flf2v}')
 
