@@ -1,9 +1,7 @@
 # diffusion-pipe
 A pipeline parallel training script for diffusion models.
 
-Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Image 2.0, Wan2.1 (t2v and i2v), Chroma, HiDream.
-
-**Work in progress.** This is a side project for me and my time is limited. I will try to add new models and features when I can.
+Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Image 2.0, Wan2.1 (t2v and i2v), Chroma, HiDream, Stable Diffusion 3, Cosmos-Predict2, OmniGen2, Flux Kontext.
 
 ## Features
 - Pipeline parallelism, for training models larger than can fit on a single GPU
@@ -15,6 +13,27 @@ Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Ima
 - Easily add new models by implementing a single subclass
 
 ## Recent changes
+- 2025-07-14
+  - Merge dev branch into main. Lots of changes that aren't relevant for most users. Recommended to use ```--regenerate_cache``` (or delete the cache folders) after update.
+      - If something breaks, please raise an issue and use the last known good commit in the meanwhile: ```git checkout 6940992455bb3bb2b88cd6e6c9463e7469929a70```
+  - Loading speed and throughput improvements for dataset caching. Will only make a big difference for very large datasets.
+  - Various dataset features and improvements to support large-scale training. Still testing, not documented yet.
+  - Add ```--trust_cache``` flag that will blindly load cached metadata files if they exist, without checking if any files changed. Can make dataset loading faster for large datasets, but you must be sure nothing in the dataset has changed since last caching. You probably don't have a large enough dataset for this to be useful.
+  - Add torch compile option that can speed up models. Not tested with all models.
+  - Add support for edit datasets and Flux Kontext. See supported models doc for details.
+- 2025-06-27
+  - OmniGen2 LoRA training is supported, but only via standard t2i training.
+  - Refactored Cosmos-Predict2 implementation to align with other rectified flow models. The only effective change is that the loss weighting is slightly different.
+- 2025-06-14
+  - Cosmos-Predict2 t2i LoRA training is supported. As usual, see the supported models doc for details.
+  - Added option for using float8_e5m2 as the transformer_dtype.
+- 2025-06-10
+  - Stable Diffusion 3 LoRA training is supported.
+  - Pinned Deepspeed version to fix error caused by Deepspeed 0.17.1.
+- 2025-05-22
+  - Add Automagic optimizer
+  - Support i2v training for LTX-Video. Thanks @GallenShao for the PR!
+  - Support multiple shuffling of tags when caching text embeddings. Credit to @gitmylo for the PR.
 - 2025-05-07
   - Switch to official implementation of LTX-Video. Allows training the 13b LTX-Video model.
 - 2025-04-19
@@ -25,22 +44,6 @@ Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Ima
   - Support nf4 quantization for HiDream. With nf4 transformer, you can train LoRA on a single 4090 even without block swapping. See supported models doc for how to enable.
 - 2025-04-15
   - Support HiDream.
-- 2025-03-18
-  - Add unsloth activation checkpointing. Reduces VRAM for a small performance hit.
-  - Add partition_split option for manually controlling how layers are divided across multiple GPUs. Thanks @arczewski for the PR!
-- 2025-03-16
-  - Support loading any optimizer from the pytorch-optimizer library.
-  - Wan transformer and UMT5 can now be loaded from ComfyUI files. Thanks to @qiwang1996 for the PR!
-- 2025-03-09
-  - Block swapping is supported for Wan, HunyuanVideo, Flux, and Chroma.
-    - Big thanks to @kohya-ss and [Musubi Tuner](https://github.com/kohya-ss/musubi-tuner) from which most of the implementation is taken.
-    - See the example hunyuan_video.toml file for how to configure.
-  - Reduced memory use of Wan by removing some forced casts to float32. I am able to measure a very small, but consistent increase in validation loss, so there is at least some decrease in quality. But the memory savings are large when training on videos, and it is likely worth it.
-    - On the 14B t2v model, by using fp8 transformer, AdamW8bitKahan optimizer, and offloading most of the blocks (e.g. blocks_to_swap=32), you can (just barely) train 512x512x81 sized videos on a single 4090.
-- 2025-03-06
-  - Change LTX-Video saved LoRA format to ComfyUI format.
-  - Allow training more recent LTX-Video versions.
-  - Add support for the Chroma model. Highly experimental. See the supported models doc.
 
 ## Windows support
 It will be difficult or impossible to make training work on native Windows. This is because Deepspeed only has [partial Windows support](https://github.com/microsoft/DeepSpeed/blob/master/blogs/windows/08-2024/README.md). Deepspeed is a hard requirement because the entire training script is built around Deepspeed pipeline parallelism. However, it will work on Windows Subsystem for Linux, specifically WSL 2. If you must use Windows I recommend trying WSL 2.
@@ -65,9 +68,9 @@ conda create -n diffusion-pipe python=3.12
 conda activate diffusion-pipe
 ```
 
-Install PyTorch first. As of this writing (May 5, 2025), you need PyTorch 2.6.0 CUDA 12.4 version (or earlier) for flash attention to work:
+Install PyTorch first. It is not listed in the requirements file, because certain GPUs sometimes need different versions of PyTorch or CUDA, and you might have to find a combination that works for your hardware. As of this writing (July 1, 2025), the latest stable PyTorch 2.7.1 with CUDA 12.8 works on my 4090, and is also compatible with the latest flash-attn 2.8.0.post2:
 ```
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
 
 Install nvcc: https://anaconda.org/nvidia/cuda-nvcc. Probably try to make it match the CUDA version of PyTorch.
@@ -78,10 +81,13 @@ pip install -r requirements.txt
 ```
 
 ### Cosmos requirements
-NVIDIA Cosmos additionally requires TransformerEngine. This dependency isn't in the requirements file. Installing this was a bit tricky for me. On Ubuntu 24.04, I had to install GCC version 12 (13 is the default in the package manager), and make sure GCC 12 and CUDNN were set during installation like this:
+NVIDIA Cosmos (the original Cosmos video model, not Cosmos-Predict2) additionally requires TransformerEngine. Cosmos-Predict2 doesn't require TransformerEngine, but it will use it when available for a slight speed increase.
+
+This dependency isn't in the requirements file. You probably need to set some environment variables for it to install correctly. The following command worked for me:
 ```
-CC=/usr/bin/gcc-12 CUDNN_PATH=/home/anon/miniconda3/envs/diffusion-pipe/lib/python3.12/site-packages/nvidia/cudnn pip install transformer_engine[pytorch]
+C_INCLUDE_PATH=/home/anon/miniconda3/envs/diffusion-pipe/lib/python3.12/site-packages/nvidia/cudnn/include:$C_INCLUDE_PATH CPLUS_INCLUDE_PATH=/home/anon/miniconda3/envs/diffusion-pipe/lib/python3.12/site-packages/nvidia/cudnn/include:$CPLUS_INCLUDE_PATH pip install --no-build-isolation transformer_engine[pytorch]
 ```
+Edit the paths above for your conda environment.
 
 ## Dataset preparation
 A dataset consists of one or more directories containing image or video files, and corresponding captions. You can mix images and videos in the same directory, but it's probably a good idea to separate them in case you need to specify certain settings on a per-directory basis. Caption files should be .txt files with the same base name as the corresponding media file, e.g. image1.png should have caption file image1.txt in the same directory. If a media file doesn't have a matching caption file, a warning is printed, but training will proceed with an empty caption.
@@ -135,7 +141,7 @@ Latents and text embeddings are cached to disk before training happens. This way
 
 This caching also means that training LoRAs for text encoders is not currently supported.
 
-Two flags are relevant for caching. ```--cache_only``` does the caching flow, then exits without training anything. ```--regenerate_cache``` forces cache regeneration. If you edit the dataset in-place (like changing a caption), you need to force regenerate the cache (or delete the cache dir) for the changes to be picked up.
+Three flags are relevant for caching. ```--cache_only``` does the caching flow, then exits without training anything. ```--regenerate_cache``` forces cache regeneration. ```--trust_cache``` will blindly load the cached metadata files, without checking if any data files have changed via the fingerprint. This can speed up loading for very large datasets (100,000+ images), but you must make sure nothing in the dataset has changed.
 
 ## Extra
 You can check out my [qlora-pipe](https://github.com/tdrussell/qlora-pipe) project, which is basically the same thing as this but for LLMs.

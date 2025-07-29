@@ -14,7 +14,7 @@ from accelerate import init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
 
 from models.base import BasePipeline, PreprocessMediaFile, make_contiguous
-from utils.common import AUTOCAST_DTYPE
+from utils.common import AUTOCAST_DTYPE, get_lin_function, time_shift
 from utils.offloading import ModelOffloader
 import wan
 from wan.modules.t5 import T5Encoder, T5Decoder, T5Model
@@ -377,6 +377,7 @@ class WanPipeline(BasePipeline):
         self.offloader = ModelOffloader('dummy', [], 0, 0, True, torch.device('cuda'), False, debug=False)
         ckpt_dir = self.model_config['ckpt_path']
         dtype = self.model_config['dtype']
+        self.cache_text_embeddings = self.model_config.get('cache_text_embeddings', True)
 
         # SkyReels V2 uses 24 FPS. There seems to be no better way to autodetect this.
         if 'skyreels' in Path(ckpt_dir).name.lower():
@@ -430,13 +431,19 @@ class WanPipeline(BasePipeline):
             tokenizer_path=os.path.join(ckpt_dir, wan_config.t5_tokenizer),
             shard_fn=None,
         )
+        if self.model_config.get('text_encoder_fp8', False):
+            for name, p in self.text_encoder.model.named_parameters():
+                if p.ndim == 2 and not ('token_embedding' in name or 'pos_embedding' in name):
+                    p.data = p.data.to(torch.float8_e4m3fn)
+        self.text_encoder.model.requires_grad_(False)
 
         # Same here, this isn't a nn.Module.
-        # TODO: by default the VAE is float32, and therefore so are the latents. Do we want to change that?
         self.vae = WanVAE(
             vae_pth=os.path.join(ckpt_dir, wan_config.vae_checkpoint),
             device='cpu',
+            dtype=dtype,
         )
+        self.vae.model.to(dtype)
         # These need to be on the device the VAE will be moved to during caching.
         self.vae.mean = self.vae.mean.to('cuda')
         self.vae.std = self.vae.std.to('cuda')
@@ -491,7 +498,10 @@ class WanPipeline(BasePipeline):
 
     def get_text_encoders(self):
         # Return the inner nn.Module
-        return [self.text_encoder.model]
+        if self.cache_text_embeddings:
+            return [self.text_encoder.model]
+        else:
+            return []
 
     def save_adapter(self, save_dir, peft_state_dict):
         self.peft_config.save_pretrained(save_dir)
@@ -499,8 +509,8 @@ class WanPipeline(BasePipeline):
         peft_state_dict = {'diffusion_model.'+k: v for k, v in peft_state_dict.items()}
         safetensors.torch.save_file(peft_state_dict, save_dir / 'adapter_model.safetensors', metadata={'format': 'pt'})
 
-    def save_model(self, save_dir, diffusers_sd):
-        raise NotImplementedError()
+    def save_model(self, save_dir, state_dict):
+        safetensors.torch.save_file(state_dict, save_dir / 'model.safetensors', metadata={'format': 'pt'})
 
     def get_preprocess_media_file_fn(self):
         return PreprocessMediaFile(
@@ -524,13 +534,14 @@ class WanPipeline(BasePipeline):
                 assert tensor.ndim == 5, f'i2v/flf2v must train on videos, got tensor with shape {tensor.shape}'
                 first_frame = tensor[:, :, 0:1, ...].clone()
                 clip_context = self.clip.visual(first_frame.to(p.device, p.dtype))
-                tensor[:, :, 1:, ...] = 0
 
                 if self.flf2v:
-                    last_frame = tensor[:, :, -2:-1, ...].clone()
+                    last_frame = tensor[:, :, -1:, ...].clone()
                     # NOTE: dim=1 is a hack to pass clip_context without microbatching breaking the zeroth dim
                     clip_context = torch.cat([clip_context, self.clip.visual(last_frame.to(p.device, p.dtype))], dim=1)
-                    tensor[:, :, :-2, ...] = 0
+                    tensor[:, :, 1:-1, ...] = 0
+                else:
+                    tensor[:, :, 1:, ...] = 0
 
                 # Image conditioning. Same shame as latents, first frame is unchanged, rest is 0.
                 # NOTE: encoding 0s with the VAE doesn't give you 0s in the latents, I tested this. So we need to
@@ -557,12 +568,15 @@ class WanPipeline(BasePipeline):
 
     def prepare_inputs(self, inputs, timestep_quantile=None):
         latents = inputs['latents'].float()
-        # TODO: why does text_embeddings become float32 here? It's bfloat16 coming out of the text encoder.
-        text_embeddings = inputs['text_embeddings']
-        seq_lens = inputs['seq_lens']
         mask = inputs['mask']
         y = inputs['y'] if self.i2v or self.flf2v else None
         clip_context = inputs['clip_context'] if self.i2v or self.flf2v else None
+
+        if self.cache_text_embeddings:
+            text_embeddings_or_ids = inputs['text_embeddings']
+            seq_lens_or_text_mask = inputs['seq_lens']
+        else:
+            text_embeddings_or_ids, seq_lens_or_text_mask = self.text_encoder.tokenizer(inputs['caption'], return_mask=True, add_special_tokens=True)
 
         bs, channels, num_frames, h, w = latents.shape
 
@@ -592,6 +606,9 @@ class WanPipeline(BasePipeline):
 
         if shift := self.model_config.get('shift', None):
             t = (t * shift) / (1 + (shift - 1) * t)
+        elif self.model_config.get('flux_shift', False):
+            mu = get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
+            t = time_shift(mu, 1.0, t)
 
         x_1 = latents
         x_0 = torch.randn_like(x_1)
@@ -603,13 +620,14 @@ class WanPipeline(BasePipeline):
         t = t * 1000
 
         return (
-            (x_t, y, t, text_embeddings, seq_lens, clip_context),
+            (x_t, y, t, text_embeddings_or_ids, seq_lens_or_text_mask, clip_context),
             (target, mask),
         )
 
     def to_layers(self):
         transformer = self.transformer
-        layers = [InitialLayer(transformer)]
+        text_encoder = None if self.cache_text_embeddings else self.text_encoder.model
+        layers = [InitialLayer(transformer, text_encoder)]
         for i, block in enumerate(transformer.blocks):
             layers.append(TransformerLayer(block, i, self.offloader))
         layers.append(FinalLayer(transformer))
@@ -644,7 +662,7 @@ class WanPipeline(BasePipeline):
 
 
 class InitialLayer(nn.Module):
-    def __init__(self, model):
+    def __init__(self, model, text_encoder):
         super().__init__()
         self.patch_embedding = model.patch_embedding
         self.time_embedding = model.time_embedding
@@ -654,10 +672,11 @@ class InitialLayer(nn.Module):
         self.flf2v = (model.model_type == 'flf2v')
         if self.i2v or self.flf2v:
             self.img_emb = model.img_emb
-        self.model = [model]
-
-    def __getattr__(self, name):
-        return getattr(self.model[0], name)
+        self.text_encoder = text_encoder
+        self.freqs = model.freqs
+        self.freq_dim = model.freq_dim
+        self.dim = model.dim
+        self.text_len = model.text_len
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
@@ -665,10 +684,20 @@ class InitialLayer(nn.Module):
             if torch.is_floating_point(item):
                 item.requires_grad_(True)
 
-        x, y, t, context, text_seq_lens, clip_fea = inputs
+        x, y, t, text_embeddings_or_ids, seq_lens_or_text_mask, clip_fea = inputs
         bs, channels, f, h, w = x.shape
         if clip_fea.numel() == 0:
             clip_fea = None
+
+        if self.text_encoder is not None:
+            assert not torch.is_floating_point(text_embeddings_or_ids)
+            with torch.no_grad():
+                context = self.text_encoder(text_embeddings_or_ids, seq_lens_or_text_mask)
+            text_seq_lens = seq_lens_or_text_mask.gt(0).sum(dim=1).long()
+        else:
+            context = text_embeddings_or_ids
+            text_seq_lens = seq_lens_or_text_mask
+
         context = [emb[:length] for emb, length in zip(context, text_seq_lens)]
 
         device = self.patch_embedding.weight.device

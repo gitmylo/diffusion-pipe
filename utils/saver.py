@@ -94,7 +94,7 @@ class Saver:
         dist.barrier()
         if dp_id == 0:
             # With BF16_Optimizer, we get pickle errors unless we do p.detach(). I have no idea why.
-            partial_state_dict = {p.original_name: p.detach() for p in self.pipeline_model.parameters()}
+            partial_state_dict = {p.original_name: p.detach() for p in self.pipeline_model.parameters() if hasattr(p, 'original_name')}
             if 'save_dtype' in self.config:
                 convert_state_dict_dtype(partial_state_dict, self.config['save_dtype'])
             torch.save(partial_state_dict, tmp_dir / f'state_dict_{stage_id}.bin')
@@ -132,7 +132,7 @@ class Saver:
             if need_to_checkpoint(self.config, epoch):
                 self.save_checkpoint(step)
                 checkpointed = True
-            if epoch % self.config['save_every_n_epochs'] == 0:
+            if 'save_every_n_epochs' in self.config and epoch % self.config['save_every_n_epochs'] == 0:
                 self.save_model(f'epoch{epoch}')
                 saved = True
             epoch = self.train_dataloader.epoch
@@ -160,9 +160,8 @@ class Saver:
             if is_main_process():
                 os.remove(save_quit_signal_file)
 
-        # TODO: support save_every_n_steps in addition to save_every_n_epochs. Maybe only one should be set?
-        # if step % self.config['save_every_n_steps'] == 0 or should_manually_save:
-        #     self.save_model(f'step{step}')
+        if 'save_every_n_steps' in self.config and step % self.config['save_every_n_steps'] == 0:
+            self.save_model(f'step{step}')
 
         if need_to_checkpoint(self.config) or should_manually_save:
             self.save_checkpoint(step)

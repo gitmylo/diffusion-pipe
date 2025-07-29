@@ -11,6 +11,10 @@
 |Wan2.1          |✅    |❌              |✅                |
 |Chroma          |✅    |✅              |✅                |
 |HiDream         |✅    |❌              |✅                |
+|SD3             |✅    |❌              |✅                |
+|Cosmos-Predict2 |✅    |✅              |✅                |
+|OmniGen2        |✅    |❌              |❌                |
+|Flux Kontext    |✅    |✅              |✅                |
 
 
 ## SDXL
@@ -67,6 +71,8 @@ dtype = 'bfloat16'
 # Can load the transformer in fp8.
 #transformer_dtype = 'float8'
 timestep_sample_method = 'logit_normal'
+# Probability to use the first video frame as conditioning (i.e. i2v training).
+#first_frame_conditioning_p = 1.0
 ```
 You can train the more recent LTX-Video versions by using single_file_path. Note that you will still need to set diffusers_path to the original model folder (it gets the text encoder from here). Only t2i and t2v training is supported.
 
@@ -220,3 +226,71 @@ Due to how the Llama3 text embeddings are computed, the Llama3 text encoder must
 Without block swapping, you will need 48GB VRAM, or 2x24GB with pipeline parallelism. With enough block swapping you can train on a single 24GB GPU. Using nf4 quantization also allows training with 24GB, but there may be some quality decrease.
 
 HiDream LoRAs are saved in ComfyUI format.
+
+## Stable Diffusion 3
+```
+[model]
+type = 'sd3'
+diffusers_path = '/data2/imagegen_models/stable-diffusion-3.5-medium'
+dtype = 'bfloat16'
+#transformer_dtype = 'float8'
+#flux_shift = true
+```
+
+Stable Diffusion 3 LoRA training is supported. You need the full Diffusers folder for the model. Tested on SD3.5 Medium and Large.
+
+SD3 LoRAs are saved in Diffusers format. This format works in ComfyUI.
+
+## Cosmos-Predict2
+```
+[model]
+type = 'cosmos_predict2'
+transformer_path = '/data2/imagegen_models/Cosmos-Predict2-2B-Text2Image/model.pt'
+vae_path = '/data2/imagegen_models/comfyui-models/wan_2.1_vae.safetensors'
+t5_path = '/data2/imagegen_models/comfyui-models/oldt5_xxl_fp16.safetensors'
+dtype = 'bfloat16'
+#transformer_dtype = 'float8_e5m2'
+```
+
+Cosmos-Predict2 supports LoRA and full fine tuning. Currently only for the t2i model variants.
+
+Set transformer_path to the original model checkpoint, vae_path to the ComfyUI Wan VAE, and t5_path to the ComfyUI [old T5 model file](https://huggingface.co/comfyanonymous/cosmos_1.0_text_encoder_and_VAE_ComfyUI/blob/main/text_encoders/oldt5_xxl_fp16.safetensors). Please note this is the OLDER version of T5, not the one that is more commonly used with other models.
+
+This model appears more sensitive to fp8 / quantization than most models. float8_e4m3fn WILL NOT work well. If you are using fp8 transformer, use float8_e5m2 as in the config above. Probably avoid using fp8 on the 2B model if you can. float8_e5m2 on the 14B transformer seems fine, and is required for training on a 24GB GPU.
+
+float8_e5m2 is also the only fp8 datatype that works for inference (as of this writing). But beware, in ComfyUI, **LoRAs don't work well when applied on a float8_e5m2 model**. The generated images are very noisy. I guess the stochastic rounding when merging the LoRA weights with this datatype just introduces too much noise. This issue doesn't affect training because the LoRA weights are separate and not merged during training. TLDR: you can use ```transformer_dtype = 'float8_e5m2'``` for training LoRAs for the 14B, but don't use fp8 on this model when applying LoRAs in ComfyUI. UPDATE: LoRAs will work fine for inference using GGUF model weights, because in that case the LoRAs aren't merged into the quantized weights.
+
+Cosmos-Predict2 LoRAs are saved in ComfyUI format.
+
+## OmniGen2
+```
+[model]
+type = 'omnigen2'
+diffusers_path = '/data2/imagegen_models/OmniGen2'
+dtype = 'bfloat16'
+#flux_shift = true
+```
+
+OmniGen2 LoRA training is supported. Set ```diffusers_path``` to the original model checkpoint directory. Only t2i training (i.e. single image and caption) is supported.
+
+OmniGen2 LoRAs are saved in ComfyUI format.
+
+## Flux Kontext
+```
+[model]
+type = 'flux'
+# Or just point to Flux Kontext Diffusers folder without needing transformer_path
+diffusers_path = '/data2/imagegen_models/FLUX.1-dev'
+transformer_path = '/data2/imagegen_models/flux-dev-single-files/flux1-kontext-dev.safetensors'
+dtype = 'bfloat16'
+transformer_dtype = 'float8'
+#flux_shift = true
+```
+
+Flux Kontext is supported, both for standard t2i datasets and edit datasets. The weight shapes are 100% compatible with Flux Dev, so if you already have the Dev Diffusers folder you can use transformer_path to point to the Kontext single model file to save space.
+
+See the [Flux Kontext example dataset config](../examples/flux_kontext_dataset.toml) for how to configure the dataset.
+
+**IMPORTANT**: The control/context images should be approximately the same aspect ratio as the target images. All of the aspect ratio and size bucketing is done with respect to the target images. Then, the control image is resized and cropped to match the target image size. If the aspect ratio of the control image is very different from the target image, it will be cropping away a lot of the control image.
+
+Flux Kontext LoRAs are saved in Diffusers format, which will work in ComfyUI.

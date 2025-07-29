@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from safetensors.torch import save_file
 from accelerate import init_empty_weights
+import peft
 
 from models.base import BasePipeline, make_contiguous
 from utils.common import AUTOCAST_DTYPE, load_state_dict
@@ -150,12 +151,18 @@ class ChromaPipeline(BasePipeline):
         with init_empty_weights():
             transformer = Chroma(chroma_params)
         transformer.load_state_dict(load_state_dict(self.model_config['transformer_path']), assign=True)
+        self.diffusers_pipeline.transformer = transformer
+
+        if 'adapter' in self.config:
+            if fuse_adapters := self.config['adapter'].get('fuse_adapters', None):
+                print(f'Fusing adapters: {fuse_adapters}')
+                for fuse_adapter in fuse_adapters:
+                    self.load_and_fuse_adapter(fuse_adapter['path'])
 
         for name, p in transformer.named_parameters():
             if not any(x in name for x in KEEP_IN_HIGH_PRECISION):
                 p.data = p.data.to(transformer_dtype)
 
-        self.diffusers_pipeline.transformer = transformer
         self.transformer.train()
         for name, p in self.transformer.named_parameters():
             p.original_name = name

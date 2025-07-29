@@ -19,3 +19,6 @@
 [submodule "submodules/LTX_Video"]
 	path = submodules/LTX_Video
 	url = https://github.com/Lightricks/LTX-Video
+[submodule "submodules/OmniGen2"]
+	path = submodules/OmniGen2
+	url = https://github.com/VectorSpaceLab/OmniGen2

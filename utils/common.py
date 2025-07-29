@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 import gc
 import time
+import math
 
 import torch
 import deepspeed.comm.comm as dist
@@ -8,7 +9,14 @@ import imageio
 from safetensors import safe_open
 
 
-DTYPE_MAP = {'float32': torch.float32, 'float16': torch.float16, 'bfloat16': torch.bfloat16, 'float8': torch.float8_e4m3fn}
+DTYPE_MAP = {
+    'float32': torch.float32,
+    'float16': torch.float16,
+    'bfloat16': torch.bfloat16,
+    'float8': torch.float8_e4m3fn,
+    'float8_e4m3fn': torch.float8_e4m3fn,
+    'float8_e5m2': torch.float8_e5m2,
+}
 VIDEO_EXTENSIONS = set(x.extension for x in imageio.config.video_extensions)
 AUTOCAST_DTYPE = None
 
@@ -53,6 +61,7 @@ def load_safetensors(path):
 
 
 def load_state_dict(path):
+    path = str(path)
     if path.endswith('.safetensors'):
         return load_safetensors(path)
     else:
@@ -65,3 +74,13 @@ def round_to_nearest_multiple(x, multiple):
 
 def round_down_to_multiple(x, multiple):
     return int((x // multiple) * multiple)
+
+
+def time_shift(mu: float, sigma: float, t: torch.Tensor):
+    return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
+
+
+def get_lin_function(x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: float = 1.15):
+    m = (y2 - y1) / (x2 - x1)
+    b = y1 - m * x1
+    return lambda x: m * x + b
